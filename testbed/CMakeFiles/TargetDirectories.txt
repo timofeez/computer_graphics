@@ -1,0 +1,3 @@
+/home/timofey/Downloads/veekay/testbed/CMakeFiles/testbed.dir
+/home/timofey/Downloads/veekay/testbed/CMakeFiles/edit_cache.dir
+/home/timofey/Downloads/veekay/testbed/CMakeFiles/rebuild_cache.dir
