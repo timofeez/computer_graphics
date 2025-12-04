@@ -17,6 +17,8 @@ find_package(Vulkan REQUIRED)
 FetchContent_Declare(
 	lodepng
 	GIT_REPOSITORY https://github.com/lvandeve/lodepng
+	GIT_TAG master
+	UPDATE_DISCONNECTED ON
 )
 
 FetchContent_MakeAvailable(lodepng)

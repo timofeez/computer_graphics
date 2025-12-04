@@ -14,6 +14,7 @@
 namespace {
 
 constexpr uint32_t max_models = 1024;
+constexpr uint32_t max_point_lights = 32;
 
 struct Vertex {
 	veekay::vec3 position;
@@ -23,11 +24,46 @@ struct Vertex {
 
 struct SceneUniforms {
 	veekay::mat4 view_projection;
+	veekay::vec3 camera_position;
+	float _padding1;
 };
 
 struct alignas(16) ModelUniforms {
 	veekay::mat4 model;
 	veekay::vec3 albedo_color;
+	float _padding1;
+	veekay::vec3 specular_color;
+	float shininess;
+};
+
+struct alignas(16) DirectionalLight {
+	veekay::vec3 direction;
+	float _padding1;
+	veekay::vec3 color;
+	float intensity;
+};
+
+struct alignas(16) PointLight {
+	veekay::vec3 position;
+	float _padding1;
+	veekay::vec3 color;
+	float intensity;
+};
+
+struct alignas(16) LightingUniforms {
+	DirectionalLight directional;
+	veekay::vec3 ambient_color;
+	float ambient_intensity;
+	uint32_t point_light_count;
+	float _padding2;
+	float _padding3;
+	float _padding4;
+};
+
+struct Material {
+	veekay::vec3 albedo;
+	veekay::vec3 specular;
+	float shininess;
 };
 
 struct Mesh {
@@ -48,7 +84,7 @@ struct Transform {
 struct Model {
 	Mesh mesh;
 	Transform transform;
-	veekay::vec3 albedo_color;
+	Material material;
 float rotation_speed = 1.0f;
 	veekay::vec3 initial_rotation = {};
 };
@@ -72,7 +108,27 @@ inline namespace {
 		.rotation = {54.0f, -139.0f, -26.0f}
 	};
 	std::vector<Model> models;
-	float global_rotation_speed = 1.0f;
+	float global_rotation_speed = 1.5f;
+	bool wireframe_mode = false;
+	
+	// Lighting
+	LightingUniforms lighting{
+		.directional = {
+			.direction = veekay::vec3::normalized({-0.5f, -1.0f, -0.3f}),
+			.color = {1.0f, 1.0f, 1.0f},
+			.intensity = 1.0f
+		},
+		.ambient_color = {1.0f, 1.0f, 1.0f},
+		.ambient_intensity = 0.2f
+	};
+	
+	std::vector<PointLight> point_lights;
+	uint32_t point_light_count = 0;
+	
+	// Camera controls
+	bool mouse_captured = false;
+	float camera_speed = 5.0f;
+	float mouse_sensitivity = 0.1f;
 }
 
 inline namespace {
@@ -86,6 +142,8 @@ inline namespace {
 	VkPipeline wireframe_pipeline;
 	veekay::graphics::Buffer* scene_uniforms_buffer;
 	veekay::graphics::Buffer* model_uniforms_buffer;
+	veekay::graphics::Buffer* lighting_uniforms_buffer;
+	veekay::graphics::Buffer* point_lights_buffer;
 	Mesh cone_mesh;
 	veekay::graphics::Texture* missing_texture;
 	VkSampler missing_texture_sampler;
@@ -101,6 +159,7 @@ veekay::mat4 Transform::matrix() const {
 	const auto rot_mtx_y = veekay::mat4::rotation({.0, -1., .0}, rotation.y);
 	const auto rot_mtx_z = veekay::mat4::rotation({.0, .0, 1.}, rotation.z);
 	auto t = veekay::mat4::translation(position);
+	// Порядок X * Y * Z: сначала наклон X (наклоняет ось), затем вращение Y, затем Z
 	return scaling_mtx * rot_mtx_x * rot_mtx_y * rot_mtx_z * t;
 }
 
@@ -303,6 +362,10 @@ void initialize(VkCommandBuffer cmd) {
 				{
 					.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 					.descriptorCount = 8,
+				},
+				{
+					.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+					.descriptorCount = 1,
 				}
 			};
 			VkDescriptorPoolCreateInfo info{
@@ -330,6 +393,18 @@ void initialize(VkCommandBuffer cmd) {
 					.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 					.descriptorCount = 1,
 					.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					.binding = 2,
+					.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+					.descriptorCount = 1,
+					.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					.binding = 3,
+					.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+					.descriptorCount = 1,
+					.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
 				},
 			};
 			VkDescriptorSetLayoutCreateInfo info{
@@ -396,10 +471,17 @@ void initialize(VkCommandBuffer cmd) {
 			.frontFace = VK_FRONT_FACE_CLOCKWISE,
 			.lineWidth = 1.0f,
 		};
+		VkDynamicState dynamic_states[] = {VK_DYNAMIC_STATE_BLEND_CONSTANTS};
+		VkPipelineDynamicStateCreateInfo dynamic_state_info{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+			.dynamicStateCount = 1,
+			.pDynamicStates = dynamic_states,
+		};
 		VkGraphicsPipelineCreateInfo line_pipeline_info = info;
 		line_pipeline_info.pInputAssemblyState = &line_assembly_info;
 		line_pipeline_info.pRasterizationState = &line_raster_info;
 		line_pipeline_info.pColorBlendState = &wireframe_blend_info;
+		line_pipeline_info.pDynamicState = &dynamic_state_info;
 		if (vkCreateGraphicsPipelines(device, nullptr, 1, &line_pipeline_info, nullptr, &wireframe_pipeline) != VK_SUCCESS) {
 			std::cerr << "Failed to create wireframe pipeline\n";
 			veekay::app.running = false;
@@ -414,6 +496,14 @@ void initialize(VkCommandBuffer cmd) {
 		max_models * sizeof(ModelUniforms),
 		nullptr,
 		VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+	lighting_uniforms_buffer = new veekay::graphics::Buffer(
+		sizeof(LightingUniforms),
+		nullptr,
+		VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+	point_lights_buffer = new veekay::graphics::Buffer(
+		max_point_lights * sizeof(PointLight),
+		nullptr,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 	{
 		VkSamplerCreateInfo info{
 			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -444,6 +534,16 @@ void initialize(VkCommandBuffer cmd) {
 				.offset = 0,
 				.range = sizeof(ModelUniforms),
 			},
+			{
+				.buffer = lighting_uniforms_buffer->buffer,
+				.offset = 0,
+				.range = sizeof(LightingUniforms),
+			},
+			{
+				.buffer = point_lights_buffer->buffer,
+				.offset = 0,
+				.range = max_point_lights * sizeof(PointLight),
+			},
 		};
 		VkWriteDescriptorSet write_infos[] = {
 			{
@@ -464,6 +564,24 @@ void initialize(VkCommandBuffer cmd) {
 				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 				.pBufferInfo = &buffer_infos[1],
 			},
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = descriptor_set,
+				.dstBinding = 2,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+				.pBufferInfo = &buffer_infos[2],
+			},
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = descriptor_set,
+				.dstBinding = 3,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.pBufferInfo = &buffer_infos[3],
+			},
 		};
 		vkUpdateDescriptorSets(device, std::size(write_infos), write_infos, 0, nullptr);
 	}
@@ -483,6 +601,7 @@ void initialize(VkCommandBuffer cmd) {
 			float z = radius * sinf(angle);
 			float len = sqrtf(radius * radius + height * height);
 			veekay::vec3 normal = {x / len, radius / len, z / len};
+			normal = veekay::vec3::normalized(normal);
 			vertices.push_back(Vertex{
 				.position = {x, 0.0f, z},
 				.normal = normal,
@@ -527,61 +646,100 @@ void initialize(VkCommandBuffer cmd) {
 		cone_mesh.indices = static_cast<uint32_t>(indices.size());
 		cone_mesh.edge_indices = static_cast<uint32_t>(edge_indices.size());
 	}
-	const veekay::vec3 fixed_color = {0.8f, 0.4f, 0.2f};
+	
+	// Enable mouse capture by default for camera controls
+	veekay::input::mouse::setCaptured(mouse_captured);
+	
+	// Initialize point lights
+	point_lights.emplace_back(PointLight{
+		.position = {2.0f, 3.0f, 2.0f},
+		.color = {1.0f, 1.0f, 1.0f},
+		.intensity = 10.0f
+	});
+	point_lights.emplace_back(PointLight{
+		.position = {-2.0f, 3.0f, -2.0f},
+		.color = {1.0f, 0.5f, 0.3f},
+		.intensity = 8.0f
+	});
+	point_light_count = static_cast<uint32_t>(point_lights.size());
+	
+	// Arrange models in an ordered grid with different colors
+	// Row 1
 	models.emplace_back(Model{
 		.mesh = cone_mesh,
 		.transform = Transform{
-			.position = {-3.0f, 0.0f, 0.0f},
+			.position = {-3.0f, 0.0f, -3.0f},
 			.scale = {1.0f, 1.0f, 1.0f},
-			.rotation = {0.0f, 0.0f, 0.0f}
+			.rotation = {1.0f, 0.0f, 0.0f}
 		},
-		.albedo_color = fixed_color,
+		.material = {
+			.albedo = {1.0f, 0.2f, 0.2f}, // Red
+			.specular = {0.8f, 0.8f, 0.8f},
+			.shininess = 32.0f
+		},
 		.rotation_speed = 1.0f,
-		.initial_rotation = {0.0f, 0.0f, 0.0f}
+		.initial_rotation = {1.0f, 0.0f, 0.0f}
 	});
 	models.emplace_back(Model{
 		.mesh = cone_mesh,
 		.transform = Transform{
-			.position = {0.0f, 0.0f, 0.0f},
-			.scale = {1.5f, 1.5f, 1.5f},
-			.rotation = {0.0f, 0.0f, 0.0f}
+			.position = {0.0f, 0.0f, -3.0f},
+			.scale = {1.0f, 1.0f, 1.0f},
+			.rotation = {1.5f, 0.0f, 0.0f}
 		},
-		.albedo_color = fixed_color,
-		.rotation_speed = 1.5f,
-		.initial_rotation = {0.17f, 2.618f, 0.0f}
+		.material = {
+			.albedo = {0.2f, 1.0f, 0.2f}, // Green
+			.specular = {0.8f, 0.8f, 0.8f},
+			.shininess = 64.0f
+		},
+		.rotation_speed = 1.0f,
+		.initial_rotation = {1.5f, 0.0f, 0.0f}
 	});
 	models.emplace_back(Model{
 		.mesh = cone_mesh,
 		.transform = Transform{
-			.position = {3.0f, 0.0f, 0.0f},
-			.scale = {0.8f, 0.8f, 0.8f},
-			.rotation = {0.0f, 0.0f, 0.0f}
+			.position = {3.0f, 0.0f, -3.0f},
+			.scale = {1.0f, 1.0f, 1.0f},
+			.rotation = {2.0f, 0.0f, 0.0f}
 		},
-		.albedo_color = fixed_color,
-		.rotation_speed = 0.8f,
-		.initial_rotation = {0.0f, 4.189f, 0.26f}
+		.material = {
+			.albedo = {0.2f, 0.2f, 1.0f}, // Blue
+			.specular = {0.8f, 0.8f, 0.8f},
+			.shininess = 128.0f
+		},
+		.rotation_speed = 1.0f,
+		.initial_rotation = {2.0f, 0.0f, 0.0f}
+	});
+	// Row 2
+	models.emplace_back(Model{
+		.mesh = cone_mesh,
+		.transform = Transform{
+			.position = {-1.5f, 0.0f, 0.0f},
+			.scale = {1.0f, 1.0f, 1.0f},
+			.rotation = {1.2f, 0.0f, 0.0f}
+		},
+		.material = {
+			.albedo = {1.0f, 1.0f, 0.2f}, // Yellow
+			.specular = {0.8f, 0.8f, 0.8f},
+			.shininess = 32.0f
+		},
+		.rotation_speed = 1.0f,
+		.initial_rotation = {1.2f, 0.0f, 0.0f}
 	});
 	models.emplace_back(Model{
 		.mesh = cone_mesh,
 		.transform = Transform{
-			.position = {-1.5f, 0.0f, -3.0f},
-			.scale = {1.2f, 1.2f, 1.2f},
-			.rotation = {0.0f, 0.0f, 0.0f}
+			.position = {1.5f, 0.0f, 0.0f},
+			.scale = {1.0f, 1.0f, 1.0f},
+			.rotation = {1.8f, 0.0f, 0.0f}
 		},
-		.albedo_color = fixed_color,
-		.rotation_speed = 1.2f,
-		.initial_rotation = {-0.13f, 1.047f, 0.0f}
-	});
-	models.emplace_back(Model{
-		.mesh = cone_mesh,
-		.transform = Transform{
-			.position = {1.5f, 0.0f, -3.0f},
-			.scale = {0.9f, 0.9f, 0.9f},
-			.rotation = {0.0f, 0.0f, 0.0f}
+		.material = {
+			.albedo = {1.0f, 0.2f, 1.0f}, // Magenta
+			.specular = {0.8f, 0.8f, 0.8f},
+			.shininess = 64.0f
 		},
-		.albedo_color = fixed_color,
-		.rotation_speed = 0.6f,
-		.initial_rotation = {0.0f, 3.665f, -0.17f}
+		.rotation_speed = 1.0f,
+		.initial_rotation = {1.8f, 0.0f, 0.0f}
 	});
 }
 
@@ -594,6 +752,8 @@ void shutdown() {
 	delete cone_mesh.edge_buffer;
 	delete model_uniforms_buffer;
 	delete scene_uniforms_buffer;
+	delete lighting_uniforms_buffer;
+	delete point_lights_buffer;
 	vkDestroyDescriptorSetLayout(device, descriptor_set_layout, nullptr);
 	vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
 	vkDestroyPipeline(device, pipeline, nullptr);
@@ -603,29 +763,168 @@ void shutdown() {
 	vkDestroyShaderModule(device, vertex_shader_module, nullptr);
 }
 
+veekay::vec3 getForwardVector(const veekay::vec3& rotation) {
+	float pitch = toRadians(rotation.x);
+	float yaw = toRadians(rotation.y);
+	return veekay::vec3{
+		cosf(pitch) * sinf(yaw),
+		-sinf(pitch),
+		cosf(pitch) * cosf(yaw)
+	};
+}
+
+veekay::vec3 getRightVector(const veekay::vec3& rotation) {
+	float yaw = toRadians(rotation.y);
+	return veekay::vec3{
+		sinf(yaw - M_PI / 2.0f),
+		0.0f,
+		cosf(yaw - M_PI / 2.0f)
+	};
+}
+
+veekay::vec3 getUpVector(const veekay::vec3& forward, const veekay::vec3& right) {
+	return veekay::vec3::normalized(veekay::vec3::cross(forward, right));
+}
+
 void update(double time) {
+	static double last_time = time;
+	double delta_time = time - last_time;
+	last_time = time;
+	
+	// Camera controls
+	if (veekay::input::keyboard::isKeyPressed(veekay::input::keyboard::Key::escape)) {
+		mouse_captured = !mouse_captured;
+		veekay::input::mouse::setCaptured(mouse_captured);
+	}
+	
+	if (mouse_captured) {
+		// Mouse look
+		veekay::vec2 mouse_delta = veekay::input::mouse::cursorDelta();
+		camera.rotation.y -= mouse_delta.x * mouse_sensitivity;
+		camera.rotation.x -= mouse_delta.y * mouse_sensitivity;
+		
+		// Clamp pitch
+		if (camera.rotation.x > 89.0f) camera.rotation.x = 89.0f;
+		if (camera.rotation.x < -89.0f) camera.rotation.x = -89.0f;
+		
+		// Keyboard movement
+		veekay::vec3 forward = getForwardVector(camera.rotation);
+		veekay::vec3 right = getRightVector(camera.rotation);
+		veekay::vec3 up = getUpVector(forward, right);
+		
+		float speed = camera_speed * static_cast<float>(delta_time);
+		if (veekay::input::keyboard::isKeyDown(veekay::input::keyboard::Key::w)) {
+			camera.position = camera.position + forward * speed;
+		}
+		if (veekay::input::keyboard::isKeyDown(veekay::input::keyboard::Key::s)) {
+			camera.position = camera.position - forward * speed;
+		}
+		if (veekay::input::keyboard::isKeyDown(veekay::input::keyboard::Key::a)) {
+			camera.position = camera.position - right * speed;
+		}
+		if (veekay::input::keyboard::isKeyDown(veekay::input::keyboard::Key::d)) {
+			camera.position = camera.position + right * speed;
+		}
+		if (veekay::input::keyboard::isKeyDown(veekay::input::keyboard::Key::space)) {
+			camera.position.y += speed;
+		}
+		if (veekay::input::keyboard::isKeyDown(veekay::input::keyboard::Key::left_shift)) {
+			camera.position.y -= speed;
+		}
+	}
+	
+	// UI
 	ImGui::Begin("Controls");
-	ImGui::SliderFloat("Rotation Speed", &global_rotation_speed, 0.0f, 5.0f);
+	ImGui::Checkbox("Wireframe", &wireframe_mode);
+	ImGui::SliderFloat("Rotation Speed", &global_rotation_speed, 0.0f, 10.0f);
+	
+	ImGui::Separator();
+	ImGui::Text("Models: %zu", models.size());
+	for (size_t i = 0; i < models.size() && i < 5; ++i) {
+		ImGui::Text("Model %zu: pos(%.1f, %.1f, %.1f)", i, 
+			models[i].transform.position.x,
+			models[i].transform.position.y,
+			models[i].transform.position.z);
+	}
+	ImGui::Separator();
+	ImGui::Text("Camera");
+	ImGui::InputFloat3("Position", &camera.position.x);
+	ImGui::InputFloat3("Rotation", &camera.rotation.x);
+	ImGui::SliderFloat("Camera Speed", &camera_speed, 0.1f, 20.0f);
+	ImGui::SliderFloat("Mouse Sensitivity", &mouse_sensitivity, 0.01f, 1.0f);
+	ImGui::Text("Controls:");
+	ImGui::Text("  ESC - Toggle mouse capture");
+	ImGui::Text("  When captured: WASD - move, Mouse - rotate");
+	ImGui::Text("  RMB (hold) - Rotate camera");
+	ImGui::Text("Mouse Captured: %s", mouse_captured ? "YES" : "NO");
+	
+	ImGui::Separator();
+	ImGui::Text("Lighting");
+	ImGui::ColorEdit3("Ambient Color", &lighting.ambient_color.x);
+	ImGui::SliderFloat("Ambient Intensity", &lighting.ambient_intensity, 0.0f, 1.0f);
+	
+	ImGui::Separator();
+	ImGui::Text("Directional Light");
+	ImGui::InputFloat3("Direction", &lighting.directional.direction.x);
+	// Normalize direction after potential UI change
+	lighting.directional.direction = veekay::vec3::normalized(lighting.directional.direction);
+	ImGui::ColorEdit3("Directional Color", &lighting.directional.color.x);
+	ImGui::SliderFloat("Directional Intensity", &lighting.directional.intensity, 0.0f, 2.0f);
+	
+	ImGui::Separator();
+	ImGui::Text("Point Lights");
+	ImGui::Text("Count: %u", point_light_count);
+	for (size_t i = 0; i < point_lights.size() && i < max_point_lights; ++i) {
+		ImGui::PushID(static_cast<int>(i));
+		if (ImGui::TreeNode(std::format("Point Light {}", i).c_str())) {
+			ImGui::InputFloat3("Position", &point_lights[i].position.x);
+			ImGui::ColorEdit3("Color", &point_lights[i].color.x);
+			ImGui::SliderFloat("Intensity", &point_lights[i].intensity, 0.0f, 20.0f);
+			ImGui::TreePop();
+		}
+		ImGui::PopID();
+	}
+	
 	ImGui::End();
+	
+	// Update model rotations - вращаются вокруг наклонной оси Y
+	// Применяем небольшой наклон к оси вращения (5 градусов)
+	const float rotation_tilt = 5.0f;
 	for (auto& model : models) {
-		model.transform.rotation.x = model.initial_rotation.x;
+		// Наклон оси вращения вокруг X (применяется перед Y, чтобы наклонить ось)
+		model.transform.rotation.x = model.initial_rotation.x + rotation_tilt;
+		// Вращение вокруг наклонной оси Y
 		model.transform.rotation.y = model.initial_rotation.y + model.rotation_speed * global_rotation_speed * time;
 		model.transform.rotation.z = model.initial_rotation.z;
 	}
+	
+	// Update uniforms - optimize by writing directly to mapped memory
 	float aspect_ratio = static_cast<float>(veekay::app.window_width) / static_cast<float>(veekay::app.window_height);
-	SceneUniforms scene_uniforms{
-		.view_projection = camera.view_projection(aspect_ratio),
-	};
-	std::vector<ModelUniforms> model_uniforms(models.size());
+	
+	// Write scene uniforms directly
+	SceneUniforms* scene_uniforms = static_cast<SceneUniforms*>(scene_uniforms_buffer->mapped_region);
+	scene_uniforms->view_projection = camera.view_projection(aspect_ratio);
+	scene_uniforms->camera_position = camera.position;
+	
+	// Write model uniforms directly
+	ModelUniforms* model_uniforms = static_cast<ModelUniforms*>(model_uniforms_buffer->mapped_region);
 	for (size_t i = 0; i < models.size(); ++i) {
-		model_uniforms[i] = ModelUniforms{
-			.model = models[i].transform.matrix(),
-			.albedo_color = models[i].albedo_color
-		};
+		model_uniforms[i].model = models[i].transform.matrix();
+		model_uniforms[i].albedo_color = models[i].material.albedo;
+		model_uniforms[i].specular_color = models[i].material.specular;
+		model_uniforms[i].shininess = models[i].material.shininess;
 	}
-	*static_cast<SceneUniforms *>(scene_uniforms_buffer->mapped_region) = scene_uniforms;
-	std::ranges::copy(model_uniforms,
-	                  static_cast<ModelUniforms*>(model_uniforms_buffer->mapped_region));
+	
+	// Write lighting uniforms directly
+	LightingUniforms* lighting_data = static_cast<LightingUniforms*>(lighting_uniforms_buffer->mapped_region);
+	*lighting_data = lighting;
+	lighting_data->point_light_count = point_light_count;
+	
+	// Update point lights buffer directly
+	PointLight* lights_data = static_cast<PointLight*>(point_lights_buffer->mapped_region);
+	for (size_t i = 0; i < point_lights.size() && i < max_point_lights; ++i) {
+		lights_data[i] = point_lights[i];
+	}
 }
 
 void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
@@ -650,21 +949,51 @@ void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
 	VkDeviceSize zero_offset = 0;
 	VkBuffer current_vertex_buffer = VK_NULL_HANDLE;
 	VkBuffer current_index_buffer = VK_NULL_HANDLE;
-	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-	for (size_t i = 0, n = models.size(); i < n; ++i) {
-		const Model& model = models[i];
-		const Mesh& mesh = model.mesh;
-		if (current_vertex_buffer != mesh.vertex_buffer->buffer) {
-			current_vertex_buffer = mesh.vertex_buffer->buffer;
-			vkCmdBindVertexBuffers(cmd, 0, 1, &current_vertex_buffer, &zero_offset);
+	
+	if (!wireframe_mode) {
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+		for (size_t i = 0, n = models.size(); i < n; ++i) {
+			const Model& model = models[i];
+			const Mesh& mesh = model.mesh;
+			if (current_vertex_buffer != mesh.vertex_buffer->buffer) {
+				current_vertex_buffer = mesh.vertex_buffer->buffer;
+				vkCmdBindVertexBuffers(cmd, 0, 1, &current_vertex_buffer, &zero_offset);
+			}
+			if (current_index_buffer != mesh.index_buffer->buffer) {
+				current_index_buffer = mesh.index_buffer->buffer;
+				vkCmdBindIndexBuffer(cmd, current_index_buffer, zero_offset, VK_INDEX_TYPE_UINT32);
+			}
+			uint32_t offset = i * sizeof(ModelUniforms);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &descriptor_set, 1, &offset);
+			vkCmdDrawIndexed(cmd, mesh.indices, 1, 0, 0, 0);
 		}
-		if (current_index_buffer != mesh.index_buffer->buffer) {
-			current_index_buffer = mesh.index_buffer->buffer;
-			vkCmdBindIndexBuffer(cmd, current_index_buffer, zero_offset, VK_INDEX_TYPE_UINT32);
+	} else {
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wireframe_pipeline);
+		for (size_t i = 0, n = models.size(); i < n; ++i) {
+			const Model& model = models[i];
+			const Mesh& mesh = model.mesh;
+			
+			// Set color for this cone's wireframe
+			float edge_color[4] = {
+				model.material.albedo.x,
+				model.material.albedo.y,
+				model.material.albedo.z,
+				1.0f
+			};
+			vkCmdSetBlendConstants(cmd, edge_color);
+			
+			if (current_vertex_buffer != mesh.vertex_buffer->buffer) {
+				current_vertex_buffer = mesh.vertex_buffer->buffer;
+				vkCmdBindVertexBuffers(cmd, 0, 1, &current_vertex_buffer, &zero_offset);
+			}
+			if (current_index_buffer != mesh.edge_buffer->buffer) {
+				current_index_buffer = mesh.edge_buffer->buffer;
+				vkCmdBindIndexBuffer(cmd, current_index_buffer, zero_offset, VK_INDEX_TYPE_UINT32);
+			}
+			uint32_t offset = i * sizeof(ModelUniforms);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &descriptor_set, 1, &offset);
+			vkCmdDrawIndexed(cmd, mesh.edge_indices, 1, 0, 0, 0);
 		}
-		uint32_t offset = i * sizeof(ModelUniforms);
-		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &descriptor_set, 1, &offset);
-		vkCmdDrawIndexed(cmd, mesh.indices, 1, 0, 0, 0);
 	}
 	// float edge_color[4] = {0.0f, 0.0f, 1.0f, 1.0f};
 	// vkCmdSetBlendConstants(cmd, edge_color);

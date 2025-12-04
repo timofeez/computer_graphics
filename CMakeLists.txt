@@ -28,18 +28,21 @@ FetchContent_Declare(
 	glfw
 	GIT_REPOSITORY https://github.com/glfw/glfw.git
 	GIT_TAG 3.4
+	UPDATE_DISCONNECTED ON
 )
 
 FetchContent_Declare(
 	vk-bootstrap
 	GIT_REPOSITORY https://github.com/charles-lunarg/vk-bootstrap
-	GIT_TAG v1.4.321
+	GIT_TAG v1.3.302
+	UPDATE_DISCONNECTED ON
 )
 
 FetchContent_Declare(
 	imgui
 	GIT_REPOSITORY https://github.com/ocornut/imgui
 	GIT_TAG v1.92.3
+	UPDATE_DISCONNECTED ON
 )
 
 find_package(Vulkan REQUIRED)

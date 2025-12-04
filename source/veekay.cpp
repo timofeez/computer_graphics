@@ -59,6 +59,7 @@ std::vector<VkFramebuffer> vk_framebuffers;
 std::vector<VkSemaphore> vk_render_semaphores;
 std::vector<VkSemaphore> vk_present_semaphores;
 std::vector<VkFence> vk_in_flight_fences;
+std::vector<VkFence> vk_images_in_flight;  // One fence per swapchain image
 uint32_t vk_current_frame;
 
 VkCommandPool vk_command_pool;
@@ -591,6 +592,9 @@ int veekay::run(const veekay::ApplicationInfo& app_info) {
 			vkCreateSemaphore(vk_device, &sem_info, nullptr, &vk_render_semaphores[i]);
 			vkCreateFence(vk_device, &fence_info, nullptr, &vk_in_flight_fences[i]);
 		}
+		
+		// Initialize fences for each swapchain image (initially null, meaning not in use)
+		vk_images_in_flight.resize(vk_swapchain_images.size(), VK_NULL_HANDLE);
 	}
 
 	{ // NOTE: Create command pool from graphics queue
@@ -677,14 +681,42 @@ int veekay::run(const veekay::ApplicationInfo& app_info) {
 		ImGui::Render();
 
 		// NOTE: Wait until the previous frame finishes
-		vkWaitForFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame], true, UINT64_MAX);
+		// Check fence status first to avoid blocking if already signaled
+		VkResult fence_status = vkGetFenceStatus(vk_device, vk_in_flight_fences[vk_current_frame]);
+		if (fence_status == VK_NOT_READY) {
+			// Fence not ready, wait with short timeout (33ms for ~30 FPS)
+			VkResult fence_result = vkWaitForFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame], true, 33000000);
+			if (fence_result == VK_TIMEOUT) {
+				// Timeout - reset fence and continue to prevent hang
+				vkResetFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame]);
+			}
+		}
 		vkResetFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame]);
 
 		// NOTE: Get current swapchain framebuffer index
 		uint32_t swapchain_image_index = 0;
-		vkAcquireNextImageKHR(vk_device, vk_swapchain, UINT64_MAX,
+		VkResult acquire_result = vkAcquireNextImageKHR(vk_device, vk_swapchain, 33000000, // 33ms timeout
 		                      vk_render_semaphores[vk_current_frame],
-		                      nullptr, &swapchain_image_index);
+		                      VK_NULL_HANDLE, &swapchain_image_index);
+		
+		if (acquire_result == VK_TIMEOUT || (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR)) {
+			// Skip this frame if timeout or error
+			continue;
+		}
+
+		// NOTE: Wait if this swapchain image is still in use by a previous frame
+		if (vk_images_in_flight[swapchain_image_index] != VK_NULL_HANDLE) {
+			VkResult image_fence_status = vkGetFenceStatus(vk_device, vk_images_in_flight[swapchain_image_index]);
+			if (image_fence_status == VK_NOT_READY) {
+				VkResult image_fence_result = vkWaitForFences(vk_device, 1, &vk_images_in_flight[swapchain_image_index], true, 33000000);
+				if (image_fence_result == VK_TIMEOUT) {
+					// Timeout - reset fence and continue
+					vkResetFences(vk_device, 1, &vk_images_in_flight[swapchain_image_index]);
+				}
+			}
+		}
+		// Mark this image as now in use by this frame
+		vk_images_in_flight[swapchain_image_index] = vk_in_flight_fences[vk_current_frame];
 
 		VkCommandBuffer cmd = vk_command_buffers[swapchain_image_index];
 
