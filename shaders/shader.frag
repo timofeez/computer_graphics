@@ -48,6 +48,8 @@ layout (binding = 3, std430) readonly buffer PointLightsBuffer {
 	PointLight lights[];
 } point_lights;
 
+layout (binding = 4) uniform sampler2D texture_sampler;
+
 vec3 blinnPhong(vec3 normal, vec3 view_dir, vec3 light_dir, vec3 light_color, float light_intensity) {
 	normal = normalize(normal);
 	view_dir = normalize(view_dir);
@@ -69,12 +71,16 @@ void main() {
 	vec3 normal = normalize(f_normal);
 	vec3 view_dir = normalize(scene.camera_position - f_position);
 	
+	// Sample texture using texture coordinates
+	vec4 texture_color = texture(texture_sampler, f_uv);
+	
 	// Ambient lighting
-	vec3 ambient = model_data.albedo_color * lighting_uniforms.ambient_color * lighting_uniforms.ambient_intensity;
+	vec3 ambient = texture_color.rgb * lighting_uniforms.ambient_color * lighting_uniforms.ambient_intensity;
 	
 	// Directional light
 	vec3 dir_light_dir = normalize(-lighting_uniforms.directional.direction);
 	vec3 dir_light = blinnPhong(normal, view_dir, dir_light_dir, lighting_uniforms.directional.color, lighting_uniforms.directional.intensity);
+	dir_light *= texture_color.rgb; // Modulate with texture color
 	
 	// Point lights with inverse square law attenuation
 	vec3 point_light_contribution = vec3(0.0);
@@ -87,9 +93,10 @@ void main() {
 		float attenuation = 1.0 / (distance * distance);
 		
 		vec3 point_light = blinnPhong(normal, view_dir, light_dir, light.color, light.intensity * attenuation);
+		point_light *= texture_color.rgb; // Modulate with texture color
 		point_light_contribution += point_light;
 	}
 	
 	vec3 final = ambient + dir_light + point_light_contribution;
-	final_color = vec4(final, 1.0f);
+	final_color = vec4(final, texture_color.a);
 }

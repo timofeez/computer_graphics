@@ -147,6 +147,8 @@ inline namespace {
 	Mesh cone_mesh;
 	veekay::graphics::Texture* missing_texture;
 	VkSampler missing_texture_sampler;
+	veekay::graphics::Texture* lenna_texture;
+	VkSampler lenna_texture_sampler;
 }
 
 float toRadians(float degrees) {
@@ -174,6 +176,16 @@ veekay::mat4 Camera::view() const {
 veekay::mat4 Camera::view_projection(float aspect_ratio) const {
 	auto projection_mtx = veekay::mat4::projection(fov, aspect_ratio, near_plane, far_plane);
 	return view() * projection_mtx;
+}
+
+std::vector<unsigned char> loadImage(const char* path, unsigned& width, unsigned& height) {
+	std::vector<unsigned char> image;
+	unsigned error = lodepng::decode(image, width, height, path);
+	if (error) {
+		std::cerr << "Failed to load image " << path << ": " << lodepng_error_text(error) << "\n";
+		return {};
+	}
+	return image;
 }
 
 VkShaderModule loadShaderModule(const char* path) {
@@ -406,6 +418,12 @@ void initialize(VkCommandBuffer cmd) {
 					.descriptorCount = 1,
 					.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
 				},
+				{
+					.binding = 4,
+					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					.descriptorCount = 1,
+					.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+				},
 			};
 			VkDescriptorSetLayoutCreateInfo info{
 				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -522,6 +540,54 @@ void initialize(VkCommandBuffer cmd) {
 		                                                VK_FORMAT_B8G8R8A8_UNORM,
 		                                                pixels);
 	}
+	// Load old_texture.png texture
+	{
+		unsigned width, height;
+		std::vector<unsigned char> image_data = loadImage("assets/old_texture.png", width, height);
+		if (image_data.empty()) {
+			std::cerr << "Failed to load old_texture.png, using missing texture\n";
+			lenna_texture = missing_texture;
+			lenna_texture_sampler = missing_texture_sampler;
+		} else {
+			// Convert RGBA to BGRA format for Vulkan
+			std::vector<uint32_t> bgra_pixels(width * height);
+			for (size_t i = 0; i < width * height; ++i) {
+				unsigned char r = image_data[i * 4 + 0];
+				unsigned char g = image_data[i * 4 + 1];
+				unsigned char b = image_data[i * 4 + 2];
+				unsigned char a = image_data[i * 4 + 3];
+				bgra_pixels[i] = (a << 24) | (r << 16) | (g << 8) | b;
+			}
+			lenna_texture = new veekay::graphics::Texture(cmd, width, height,
+			                                             VK_FORMAT_B8G8R8A8_UNORM,
+			                                             bgra_pixels.data());
+			
+			// Create sampler with reasonable parameters
+			VkSamplerCreateInfo sampler_info{
+				.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+				.magFilter = VK_FILTER_LINEAR,
+				.minFilter = VK_FILTER_LINEAR,
+				.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+				.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+				.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+				.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+				.mipLodBias = 0.0f,
+				.anisotropyEnable = VK_TRUE,
+				.maxAnisotropy = 16.0f,
+				.compareEnable = VK_FALSE,
+				.compareOp = VK_COMPARE_OP_ALWAYS,
+				.minLod = 0.0f,
+				.maxLod = 16.0f,
+				.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+				.unnormalizedCoordinates = VK_FALSE,
+			};
+			if (vkCreateSampler(device, &sampler_info, nullptr, &lenna_texture_sampler) != VK_SUCCESS) {
+				std::cerr << "Failed to create old_texture sampler\n";
+				veekay::app.running = false;
+				return;
+			}
+		}
+	}
 	{
 		VkDescriptorBufferInfo buffer_infos[] = {
 			{
@@ -544,6 +610,11 @@ void initialize(VkCommandBuffer cmd) {
 				.offset = 0,
 				.range = max_point_lights * sizeof(PointLight),
 			},
+		};
+		VkDescriptorImageInfo image_info{
+			.sampler = lenna_texture_sampler,
+			.imageView = lenna_texture->view,
+			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		};
 		VkWriteDescriptorSet write_infos[] = {
 			{
@@ -581,6 +652,15 @@ void initialize(VkCommandBuffer cmd) {
 				.descriptorCount = 1,
 				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 				.pBufferInfo = &buffer_infos[3],
+			},
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = descriptor_set,
+				.dstBinding = 4,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				.pImageInfo = &image_info,
 			},
 		};
 		vkUpdateDescriptorSets(device, std::size(write_infos), write_infos, 0, nullptr);
@@ -747,6 +827,10 @@ void shutdown() {
 	VkDevice& device = veekay::app.vk_device;
 	vkDestroySampler(device, missing_texture_sampler, nullptr);
 	delete missing_texture;
+	if (lenna_texture != missing_texture) {
+		vkDestroySampler(device, lenna_texture_sampler, nullptr);
+		delete lenna_texture;
+	}
 	delete cone_mesh.index_buffer;
 	delete cone_mesh.vertex_buffer;
 	delete cone_mesh.edge_buffer;
