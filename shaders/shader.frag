@@ -3,6 +3,7 @@
 layout (location = 0) in vec3 f_position;
 layout (location = 1) in vec3 f_normal;
 layout (location = 2) in vec2 f_uv;
+layout (location = 3) in vec4 f_position_light_space;
 
 layout (location = 0) out vec4 final_color;
 
@@ -49,6 +50,25 @@ layout (binding = 3, std430) readonly buffer PointLightsBuffer {
 } point_lights;
 
 layout (binding = 4) uniform sampler2D texture_sampler;
+layout (binding = 5) uniform sampler2DShadow shadow_map;
+
+float calculateShadow(vec4 frag_pos_light_space) {
+	// Perform perspective divide
+	vec3 proj_coords = frag_pos_light_space.xyz / frag_pos_light_space.w;
+	// Transform to [0,1] range
+	proj_coords = proj_coords * 0.5 + 0.5;
+	
+	// Check if fragment is outside light's view frustum
+	if (proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
+	    proj_coords.y < 0.0 || proj_coords.y > 1.0 ||
+	    proj_coords.z < 0.0 || proj_coords.z > 1.0) {
+		return 1.0; // Not in shadow if outside frustum
+	}
+	
+	// Sample shadow map with comparison
+	float shadow = texture(shadow_map, proj_coords);
+	return shadow;
+}
 
 vec3 blinnPhong(vec3 normal, vec3 view_dir, vec3 light_dir, vec3 light_color, float light_intensity) {
 	normal = normalize(normal);
@@ -77,10 +97,12 @@ void main() {
 	// Ambient lighting
 	vec3 ambient = texture_color.rgb * lighting_uniforms.ambient_color * lighting_uniforms.ambient_intensity;
 	
-	// Directional light
+	// Directional light with shadows
 	vec3 dir_light_dir = normalize(-lighting_uniforms.directional.direction);
+	float shadow = calculateShadow(f_position_light_space);
 	vec3 dir_light = blinnPhong(normal, view_dir, dir_light_dir, lighting_uniforms.directional.color, lighting_uniforms.directional.intensity);
 	dir_light *= texture_color.rgb; // Modulate with texture color
+	dir_light *= shadow; // Apply shadow - this makes objects darker when in shadow
 	
 	// Point lights with inverse square law attenuation
 	vec3 point_light_contribution = vec3(0.0);

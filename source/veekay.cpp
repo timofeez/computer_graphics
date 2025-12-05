@@ -124,7 +124,8 @@ int veekay::run(const veekay::ApplicationInfo& app_info) {
 	{ // NOTE: Initialize Vulkan: grab device and create swapchain
 		vkb::InstanceBuilder instance_builder;
 
-		auto builder_result = instance_builder.require_api_version(1, 2, 0)
+        // Require Vulkan 1.3 to use core dynamic rendering entry points
+        auto builder_result = instance_builder.require_api_version(1, 3, 0)
 		                                      .request_validation_layers()
 		                                      .use_default_debug_messenger()
 		                                      .build();
@@ -153,6 +154,7 @@ int veekay::run(const veekay::ApplicationInfo& app_info) {
 
 		auto selector_result = physical_device_selector.set_surface(vk_surface)
 		                                               .set_required_features(device_features)
+		                                               .add_required_extension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
 		                                               .select();
 		if (!selector_result) {
 			std::cerr << selector_result.error().message() << '\n';
@@ -162,8 +164,17 @@ int veekay::run(const veekay::ApplicationInfo& app_info) {
 		auto physical_device = selector_result.value();
 
 		{
+			// Enable dynamic rendering feature (must stay in scope until build() completes)
+			// Using static to ensure it persists beyond the scope
+			static VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering_features{
+				.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+				.pNext = nullptr,
+				.dynamicRendering = VK_TRUE,
+			};
+			
 			vkb::DeviceBuilder device_builder(physical_device);
-
+			device_builder.add_pNext(&dynamic_rendering_features);
+			
 			auto result = device_builder.build();
 
 			if (!result) {
