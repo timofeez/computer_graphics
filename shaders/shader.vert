@@ -18,7 +18,7 @@ layout (binding = 0, std140) uniform SceneUniforms {
 layout (binding = 1, std140) uniform ModelUniforms {
 	mat4 model;
 	vec3 albedo_color;
-	float _padding1;
+	float use_texture; // 1.0 to use texture, 0.0 to use albedo_color only
 	vec3 specular_color;
 	float shininess;
 } model_data;

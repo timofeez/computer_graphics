@@ -49,6 +49,10 @@ vec2 scrollDelta() {
 	return scroll_delta;
 }
 
+void resetCursorDelta() {
+	cached_cursor_position = cursor_position;
+}
+
 } // namespace mouse
 
 namespace keyboard {

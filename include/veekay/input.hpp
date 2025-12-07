@@ -21,6 +21,8 @@ void setCaptured(bool capture);
 vec2 cursorPosition();
 vec2 cursorDelta();
 vec2 scrollDelta();
+// Reset cached cursor delta to avoid jumps after toggling capture
+void resetCursorDelta();
 
 } // namespace mouse
 

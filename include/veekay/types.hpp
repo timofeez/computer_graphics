@@ -403,14 +403,15 @@ union mat4 {
 	static mat4 orthographic(float left, float right, float bottom, float top, float near, float far) {
 		mat4 result{};
 
+		// For Vulkan, NDC Z range is [0, 1] where 0 = near, 1 = far
 		result[0][0] = 2.0f / (right - left);
 		result[1][1] = 2.0f / (top - bottom);
-		result[2][2] = 1.0f / (far - near);
+		result[2][2] = 1.0f / (far - near);  // Maps view Z to [0, 1] NDC
 		result[3][3] = 1.0f;
 
 		result[3][0] = -(right + left) / (right - left);
 		result[3][1] = -(top + bottom) / (top - bottom);
-		result[3][2] = -near / (far - near);
+		result[3][2] = -near / (far - near);  // Ensures near -> 0, far -> 1
 
 		return result;
 	}
