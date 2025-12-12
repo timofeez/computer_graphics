@@ -58,6 +58,7 @@ float calculateShadow(vec4 frag_pos_light_space, vec3 normal, vec3 light_dir) {
 	
 	// Transform from NDC [-1,1] to texture coordinates [0,1]
 	vec2 tex_coords = proj_coords.xy * 0.5 + 0.5;
+	// Для ортогональной проекции глубина уже в диапазоне [0,1] после деления на w
 	float current_depth = proj_coords.z;
 	
 	// Check if fragment is outside light's view frustum
@@ -75,17 +76,18 @@ float calculateShadow(vec4 frag_pos_light_space, vec3 normal, vec3 light_dir) {
 	// For D32_SFLOAT format read as sampler2D, depth is stored in red channel
 	float shadow_map_depth = texture(shadow_map, tex_coords).r;
 	
-	// Add depth bias to prevent self-shadowing (shadow acne)
-	// Adaptive bias based on surface angle
+// Add depth bias to prevent self-shadowing (shadow acne)
+// Минимизируем bias, чтобы убрать panning, но оставляем чуть-чуть для acne
 	float ndotl = max(dot(normal, light_dir), 0.0);
-	float bias = max(0.005 * (1.0 - ndotl), 0.0005);
+// Для плоскостей (ndotl близко к 0) чуть увеличиваем bias, но оставляем очень маленьким
+float bias_factor = 1.0 - ndotl;
+float bias = max(0.0006 * bias_factor * bias_factor, 0.00005); // Минимум: ближе к объекту, чуть защищаем от acne
 	float biased_depth = max(0.0, current_depth - bias);
 	
 	// Depth comparison: 
 	// - If biased_depth > shadow_map_depth: fragment is behind shadow caster = IN SHADOW (return 0.0)
 	// - If biased_depth <= shadow_map_depth: fragment is in front = LIT (return 1.0)
 	// For Vulkan: smaller depth values = closer to camera/light (near plane = 0.0)
-	// float shadow = step(biased_depth, shadow_map_depth); // Returns 1.0 if biased_depth <= shadow_map_depth
 	
 	// Apply PCF (Percentage Closer Filtering) for smoother shadow edges
 	vec2 texel_size = 1.0 / vec2(textureSize(shadow_map, 0));
@@ -95,14 +97,14 @@ float calculateShadow(vec4 frag_pos_light_space, vec3 normal, vec3 light_dir) {
 	// Sample 3x3 neighborhood
 	for (int x = -1; x <= 1; ++x) {
 		for (int y = -1; y <= 1; ++y) {
-			// if (x == 0 && y == 0) continue; // Skip center sample (already added)
-			
 			// Widen the sampling kernel slightly for softer edges
 			vec2 offset = vec2(float(x), float(y)) * texel_size * 1.5;
 			vec2 sample_uv = clamp(tex_coords + offset, 0.001, 0.999);
 			float sample_depth = texture(shadow_map, sample_uv).r;
 			
 			// Compare depth at this sample location
+			// Используем стандартное сравнение для близости теней
+			// Используем step для сравнения: возвращает 1.0 если biased_depth <= sample_depth
 			shadow_sum += step(biased_depth, sample_depth);
 			sample_count += 1.0;
 		}

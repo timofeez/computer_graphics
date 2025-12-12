@@ -166,8 +166,8 @@ int veekay::run(const veekay::ApplicationInfo& app_info) {
 		{
 			// Enable dynamic rendering feature (must stay in scope until build() completes)
 			// Using static to ensure it persists beyond the scope
-			static VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering_features{
-				.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+			static VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_features{
+				.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
 				.pNext = nullptr,
 				.dynamicRendering = VK_TRUE,
 			};

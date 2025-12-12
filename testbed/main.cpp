@@ -128,6 +128,10 @@ inline namespace { // Глобальные переменные в аноним�
 	std::vector<PointLight> point_lights; // Вектор точечных источников
 	uint32_t point_light_count = 0; // Счетчик точечных источников
 	
+	// Углы для вращения направления света
+	float light_azimuth = -135.0f; // Азимут (горизонтальный угол) в градусах
+	float light_elevation = -20.0f; // Элевация (вертикальный угол) в градусах
+	
 	bool mouse_captured = false; // Флаг захвата мыши окном
 	float camera_speed = 5.0f; // Скорость полета камеры
 	float mouse_sensitivity = 0.1f; // Чувствительность мыши
@@ -1108,9 +1112,9 @@ void initialize(VkCommandBuffer cmd) { // Функция инициализац�
 			.cullMode = VK_CULL_MODE_FRONT_BIT, // Cull Front Faces -> Render Back Faces. Решает проблему "Acne".
 			.frontFace = VK_FRONT_FACE_CLOCKWISE,
 			.depthBiasEnable = VK_TRUE,
-			.depthBiasConstantFactor = 1.25f, // Смещение геометрии для борьбы с Peter Panning
+			.depthBiasConstantFactor = 0.0f, // Убираем лишний отрыв теней от касателей
 			.depthBiasClamp = 0.0f,
-			.depthBiasSlopeFactor = 1.75f,
+			.depthBiasSlopeFactor = 0.05f, // Минимальный slope bias для борьбы с acne без пэннинга
 			.lineWidth = 1.0f,
 		};
 		
@@ -1123,7 +1127,7 @@ void initialize(VkCommandBuffer cmd) { // Функция инициализац�
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
 			.depthTestEnable = VK_TRUE,
 			.depthWriteEnable = VK_TRUE,
-			.depthCompareOp = VK_COMPARE_OP_LESS, // Храним ближайшую к свету глубину
+			.depthCompareOp = VK_COMPARE_OP_LESS, // Возвращаем строгое сравнение, чтобы не отрывать тени
 			.depthBoundsTestEnable = VK_FALSE,
 			.stencilTestEnable = VK_FALSE,
 		};
@@ -1535,8 +1539,28 @@ void update(double time) { // Логика обновления (вызывае�
 	
 	ImGui::Separator();
 	ImGui::Text("Directional Light");
-	ImGui::InputFloat3("Direction", &lighting.directional.direction.x);
-	// Нормализация убрана, чтобы UI не конфликтовал с вводом
+	// Слайдеры для вращения направления света
+	bool light_changed = false;
+	if (ImGui::SliderFloat("Light Azimuth", &light_azimuth, -180.0f, 180.0f)) {
+		light_changed = true;
+	}
+	if (ImGui::SliderFloat("Light Elevation", &light_elevation, -90.0f, 90.0f)) {
+		light_changed = true;
+	}
+	// Обновляем направление света на основе углов
+	if (light_changed) {
+		float az_rad = toRadians(light_azimuth);
+		float el_rad = toRadians(light_elevation);
+		lighting.directional.direction = veekay::vec3::normalized({
+			cosf(el_rad) * sinf(az_rad),
+			-sinf(el_rad),
+			cosf(el_rad) * cosf(az_rad)
+		});
+	}
+	ImGui::Text("Direction: (%.3f, %.3f, %.3f)", 
+		lighting.directional.direction.x,
+		lighting.directional.direction.y,
+		lighting.directional.direction.z);
 	ImGui::ColorEdit3("Directional Color", &lighting.directional.color.x);
 	ImGui::SliderFloat("Directional Intensity", &lighting.directional.intensity, 0.0f, 2.0f);
 	
@@ -1592,6 +1616,15 @@ void update(double time) { // Логика обновления (вызывае�
 	for (size_t i = 0; i < point_lights.size() && i < max_point_lights; ++i) {
 		lights_data[i] = point_lights[i];
 	}
+	
+	// Обновляем направление света на основе углов (на случай если оно изменилось)
+	float az_rad = toRadians(light_azimuth);
+	float el_rad = toRadians(light_elevation);
+	lighting.directional.direction = veekay::vec3::normalized({
+		cosf(el_rad) * sinf(az_rad),
+		-sinf(el_rad),
+		cosf(el_rad) * cosf(az_rad)
+	});
 	
 	// Расчет матрицы света для теней
 	LightUniforms* light_uniforms = static_cast<LightUniforms*>(light_uniforms_buffer->mapped_region);
@@ -1682,9 +1715,6 @@ void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) { // Основно�
 		
 		// Отрисовка моделей в карту теней
 		for (size_t i = 0, n = models.size(); i < n; ++i) {
-			// Пропускаем плоскость в проходе теней, чтобы избежать артефактов на полу
-			if (i == 0) continue;
-
 			const Model& model = models[i];
 			const Mesh& mesh = model.mesh;
 			
